@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>ゲートラッシュ - 3Dタイムアタック</title>
+<style>
+:root{--ink:#1b1f3b;--paper:#f6efe3;--gate:#ffd23f;--cone:#ff5a1f}
+*{box-sizing:border-box;margin:0}
+html,body{height:100%;overflow:hidden;background:var(--ink);font-family:"Hiragino Sans","Yu Gothic",Meiryo,sans-serif;color:var(--paper);touch-action:none}
+canvas{display:block}
+#hud{position:fixed;inset:0;pointer-events:none}
+#time{position:absolute;top:14px;left:18px;font:700 clamp(36px,8vw,64px)/1 "Courier New",monospace;text-shadow:0 2px 0 rgba(0,0,0,.35)}
+#info{position:absolute;top:18px;right:18px;text-align:right;font-size:15px;line-height:1.6;text-shadow:0 1px 0 rgba(0,0,0,.4)}
+#speed{position:absolute;bottom:18px;left:50%;transform:translateX(-50%);font:700 22px "Courier New",monospace}
+#count{position:absolute;inset:0;display:grid;place-items:center;font:900 min(30vw,200px)/1 sans-serif;color:var(--gate);text-shadow:0 6px 0 var(--cone)}
+.panel{position:fixed;inset:0;display:grid;place-content:center;gap:14px;text-align:center;background:rgba(27,31,59,.78);padding:24px}
+.panel h1{font-size:clamp(34px,8vw,64px);letter-spacing:.04em}
+.panel p{max-width:34em;line-height:1.8;margin:auto}
+button{pointer-events:auto;font:700 20px inherit;font-family:inherit;padding:14px 40px;border:0;border-radius:6px;background:var(--gate);color:var(--ink);cursor:pointer;justify-self:center}
+button:focus-visible{outline:3px solid var(--paper);outline-offset:3px}
+.hide{display:none!important}
+#pad{position:fixed;bottom:16px;left:0;right:0;display:none;justify-content:space-between;padding:0 16px}
+#pad div{display:flex;gap:10px}
+#pad span{width:72px;height:72px;border-radius:50%;background:rgba(246,239,227,.28);display:grid;place-items:center;font-size:26px;user-select:none}
+@media (pointer:coarse){#pad{display:flex}#speed{display:none}}
+</style>
+</head>
+<body>
+<div id="hud" class="hide">
+  <div id="time">0.00</div>
+  <div id="info"><div id="cp">ゲート 0 / 8</div><div id="best"></div></div>
+  <div id="speed">0 km/h</div>
+  <div id="count"></div>
+</div>
+<div id="pad" class="hide"><div><span id="bL">◀</span><span id="bR">▶</span></div><div><span id="bB">■</span><span id="bA">▲</span></div></div>
+<div class="panel" id="start">
+  <h1>ゲートラッシュ</h1>
+  <p>夕暮れの飛行場に並んだ8つの黄色いゲートを、順番にすべて通り抜けろ。タイムは0.01秒単位で記録される。</p>
+  <p>操作：↑↓ / W S で加速・ブレーキ、← → / A D でハンドル、R でリスタート<br>スマホは画面のボタンで操作</p>
+  <button id="go">スタート</button>
+</div>
+<div class="panel hide" id="end">
+  <h1 id="rt"></h1>
+  <p id="rm"></p>
+  <button id="again">もう一度走る</button>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(()=>{
+const $=id=>document.getElementById(id);
+const GATES=[[0,-40],[40,-70],[75,-20],[60,40],[10,70],[-45,55],[-75,0],[-50,-60]];
+const LIM=95, KEY="gaterush-best";
+
+// --- renderer / scene ---
+const renderer=new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+document.body.prepend(renderer.domElement);
+const scene=new THREE.Scene();
+scene.background=new THREE.Color(0xf09a6a);
+scene.fog=new THREE.Fog(0xf09a6a,60,230);
+const cam=new THREE.PerspectiveCamera(65,1,.1,500);
+scene.add(new THREE.HemisphereLight(0xffe2c4,0x4a4a6a,.9));
+const sun=new THREE.DirectionalLight(0xffc48a,.9);sun.position.set(-60,40,-40);scene.add(sun);
+
+// ground & lines
+const ground=new THREE.Mesh(new THREE.PlaneGeometry(2000,2000),new THREE.MeshLambertMaterial({color:0x9d9a9c}));
+ground.rotation.x=-Math.PI/2;scene.add(ground);
+const pad=new THREE.Mesh(new THREE.PlaneGeometry(LIM*2+10,LIM*2+10),new THREE.MeshLambertMaterial({color:0xcfc8bb}));
+pad.rotation.x=-Math.PI/2;pad.position.y=.02;scene.add(pad);
+const grid=new THREE.GridHelper(LIM*2,20,0xffffff,0xb8b0a2);grid.position.y=.05;scene.add(grid);
+const wallMat=new THREE.MeshLambertMaterial({color:0xff5a1f});
+for(let i=-LIM;i<=LIM;i+=10)for(const [x,z] of [[i,-LIM],[i,LIM],[-LIM,i],[LIM,i]]){
+  const c=new THREE.Mesh(new THREE.ConeGeometry(.8,1.8,8),wallMat);c.position.set(x,.9,z);scene.add(c);}
+
+// pillars (seeded)
+let seed=7;const rnd=()=>(seed=(seed*16807)%2147483647)/2147483647;
+const pillars=[];
+const pmat=new THREE.MeshLambertMaterial({color:0x3a3f6b});
+while(pillars.length<16){
+  const x=(rnd()*2-1)*80,z=(rnd()*2-1)*80;
+  if(Math.hypot(x,z)<14||GATES.some(g=>Math.hypot(g[0]-x,g[1]-z)<14))continue;
+  const r=2+rnd()*1.5;
+  const m=new THREE.Mesh(new THREE.CylinderGeometry(r,r,8,16),pmat);m.position.set(x,4,z);scene.add(m);
+  pillars.push({x,z,r});
+}
+
+// gates
+const gates=GATES.map(([x,z],i)=>{
+  const g=new THREE.Group();g.position.set(x,0,z);
+  const ring=new THREE.Mesh(new THREE.TorusGeometry(4.5,.5,12,32),new THREE.MeshLambertMaterial({color:0xffd23f,emissive:0x553d00}));
+  ring.position.y=4.5;g.add(ring);
+  const beam=new THREE.Mesh(new THREE.CylinderGeometry(1.2,1.2,80,12,1,true),new THREE.MeshBasicMaterial({color:0xffd23f,transparent:true,opacity:.35,side:THREE.DoubleSide,fog:false}));
+  beam.position.y=40;g.add(beam);
+  scene.add(g);return {g,ring,beam};
+});
+
+// car
+const car=new THREE.Group();
+const body=new THREE.Mesh(new THREE.BoxGeometry(2,.8,3.6),new THREE.MeshLambertMaterial({color:0xe83a3a}));body.position.y=.7;
+const cab=new THREE.Mesh(new THREE.BoxGeometry(1.6,.7,1.6),new THREE.MeshLambertMaterial({color:0xf6efe3}));cab.position.set(0,1.4,-.2);
+car.add(body,cab);
+for(const [x,z] of [[-1.1,1.2],[1.1,1.2],[-1.1,-1.2],[1.1,-1.2]]){
+  const w=new THREE.Mesh(new THREE.CylinderGeometry(.45,.45,.4,12),new THREE.MeshLambertMaterial({color:0x222}));
+  w.rotation.z=Math.PI/2;w.position.set(x,.45,z);car.add(w);}
+scene.add(car);
+
+// --- state ---
+let st="idle",heading=0,speed=0,next=0,t0=0,elapsed=0,best=null;
+try{best=parseFloat(localStorage.getItem(KEY))||null}catch(e){}
+const keys={};
+const press=(k,v)=>{keys[k]=v};
+addEventListener("keydown",e=>{
+  const k=e.key.toLowerCase();
+  if(k==="r")reset();
+  if(["arrowup","arrowdown","arrowleft","arrowright"," "].includes(k))e.preventDefault();
+  press(k,1)});
+addEventListener("keyup",e=>press(e.key.toLowerCase(),0));
+for(const [id,k] of [["bL","arrowleft"],["bR","arrowright"],["bA","arrowup"],["bB","arrowdown"]]){
+  const el=$(id);
+  el.addEventListener("pointerdown",e=>{e.preventDefault();press(k,1)});
+  for(const ev of ["pointerup","pointerleave","pointercancel"])el.addEventListener(ev,()=>press(k,0));
+}
+
+function fmt(t){return t.toFixed(2)}
+function paintGates(){
+  gates.forEach((o,i)=>{
+    const active=i===next;
+    o.beam.visible=active;
+    o.ring.material.color.set(i<next?0x6a6a7a:0xffd23f);
+    o.ring.material.emissive.set(active?0x886600:0x000000);
+    o.g.visible=i>=next||true;
+  });
+  $("cp").textContent=`ゲート ${next} / ${GATES.length}`;
+}
+function reset(){
+  heading=0;speed=0;next=0;elapsed=0;
+  car.position.set(0,0,0);car.rotation.y=0;
+  $("time").textContent="0.00";
+  $("best").textContent=best?`ベスト ${fmt(best)}秒`:"ベスト --";
+  paintGates();
+  if(st==="idle"||st==="done"&&false)return;
+  countdown();
+}
+function countdown(){
+  st="count";let n=3;
+  $("end").classList.add("hide");
+  $("count").textContent=n;
+  const iv=setInterval(()=>{
+    n--;
+    if(st!=="count"){clearInterval(iv);return}
+    if(n>0)$("count").textContent=n;
+    else{clearInterval(iv);$("count").textContent="GO!";st="run";t0=performance.now();
+      setTimeout(()=>{if(st==="run")$("count").textContent=""},700)}
+  },800);
+}
+function finish(){
+  st="done";
+  const rec=!best||elapsed<best;
+  if(rec){best=elapsed;try{localStorage.setItem(KEY,String(best))}catch(e){}}
+  $("rt").textContent=`${fmt(elapsed)} 秒`;
+  $("rm").textContent=rec?"ベスト更新！":`ベスト ${fmt(best)} 秒まであと ${fmt(elapsed-best)} 秒`;
+  $("best").textContent=`ベスト ${fmt(best)}秒`;
+  $("end").classList.remove("hide");
+}
+$("go").onclick=()=>{$("start").classList.add("hide");$("hud").classList.remove("hide");$("pad").classList.remove("hide");st="count";reset()};
+$("again").onclick=()=>{st="count";reset()};
+
+// --- loop ---
+function resize(){renderer.setSize(innerWidth,innerHeight);cam.aspect=innerWidth/innerHeight;cam.updateProjectionMatrix()}
+addEventListener("resize",resize);resize();
+
+let last=performance.now();
+function loop(now){
+  requestAnimationFrame(loop);
+  const dt=Math.min((now-last)/1000,.05);last=now;
+  const run=st==="run";
+  if(run){
+    const up=keys.arrowup||keys.w,dn=keys.arrowdown||keys.s;
+    const l=keys.arrowleft||keys.a,r=keys.arrowright||keys.d;
+    if(up)speed+=38*dt;
+    if(dn)speed-=(speed>0?60:25)*dt;
+    speed*=Math.pow(.6,dt*(up||dn?.4:1.2)); // drag
+    speed=Math.max(-14,Math.min(52,speed));
+    const steer=((l?1:0)-(r?1:0))*2.3*Math.max(-1,Math.min(1,speed/10));
+    heading+=steer*dt;
+    car.position.x+=Math.sin(heading)*speed*dt;
+    car.position.z+=Math.cos(heading)*speed*dt;
+    // bounds
+    for(const a of ["x","z"]){
+      if(Math.abs(car.position[a])>LIM){car.position[a]=Math.sign(car.position[a])*LIM;speed*=.6}}
+    // pillars
+    for(const p of pillars){
+      const dx=car.position.x-p.x,dz=car.position.z-p.z,d=Math.hypot(dx,dz),m=p.r+1.6;
+      if(d<m){car.position.x=p.x+dx/d*m;car.position.z=p.z+dz/d*m;speed*=.4}}
+    // gate
+    const [gx,gz]=GATES[next];
+    if(Math.hypot(car.position.x-gx,car.position.z-gz)<5.5){
+      next++;
+      if(next>=GATES.length){elapsed=(performance.now()-t0)/1000;paintGates();finish()}
+      else paintGates();
+    }
+    elapsed=(performance.now()-t0)/1000;
+    if(st==="run")$("time").textContent=fmt(elapsed);
+    $("speed").textContent=`${Math.round(Math.abs(speed)*3.6)} km/h`;
+  }
+  car.rotation.y=heading;
+  gates.forEach((o,i)=>{o.ring.rotation.y+=dt*(i===next?2.5:.4)});
+  // chase camera
+  const back=11+Math.abs(speed)*.06;
+  const tx=car.position.x-Math.sin(heading)*back,tz=car.position.z-Math.cos(heading)*back;
+  cam.position.x+=(tx-cam.position.x)*Math.min(1,dt*5);
+  cam.position.z+=(tz-cam.position.z)*Math.min(1,dt*5);
+  cam.position.y=5.5;
+  cam.lookAt(car.position.x+Math.sin(heading)*6,1.5,car.position.z+Math.cos(heading)*6);
+  renderer.render(scene,cam);
+}
+cam.position.set(0,5.5,-11);
+paintGates();$("best").textContent=best?`ベスト ${fmt(best)}秒`:"ベスト --";
+requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
